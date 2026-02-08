@@ -274,6 +274,8 @@ class XClient:
                 "max_results": max_results,
                 "dm_event.fields": "id,text,created_at,sender_id,dm_conversation_id,attachments",
                 "event_types": "MessageCreate",
+                "expansions": "sender_id",
+                "user.fields": config.USER_FIELDS,
             },
             use_oauth=True,
         )

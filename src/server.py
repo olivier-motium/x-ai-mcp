@@ -22,6 +22,7 @@ mcp = FastMCP(
     "x-ai",
     host=config.MCP_HOST,
     port=config.MCP_PORT,
+    stateless_http=True,
 )
 
 # Clients initialized lazily on first tool call
@@ -139,15 +140,99 @@ async def x_search_tweets(query: str, count: int = 20) -> str:
 # ──────────────────────────────────────────────
 
 
+def _split_dm_conversations(data: dict) -> tuple[list[dict], list[dict], dict[str, str]]:
+    """Split DM events into real conversations vs message requests.
+
+    Returns (real_convos, requests, user_map) where each list contains
+    conversation dicts with 'conversation_id', 'events', 'participants'.
+    user_map maps user_id -> @username.
+    """
+    events = data.get("data", [])
+    includes = data.get("includes", {})
+    my_id = config.X_USER_ID
+
+    # Build user_id -> @username map from includes
+    user_map: dict[str, str] = {}
+    for u in includes.get("users", []):
+        user_map[u["id"]] = f"@{u['username']}"
+
+    # Group events by conversation
+    convos: dict[str, list[dict]] = {}
+    for e in events:
+        cid = e.get("dm_conversation_id", "unknown")
+        convos.setdefault(cid, []).append(e)
+
+    real = []
+    requests = []
+    for cid, msgs in convos.items():
+        senders = {e.get("sender_id") for e in msgs}
+        entry = {"conversation_id": cid, "events": msgs, "participants": senders}
+        if my_id in senders:
+            real.append(entry)
+        else:
+            requests.append(entry)
+
+    return real, requests, user_map
+
+
+def _format_conversations(convos: list[dict], user_map: dict[str, str]) -> str:
+    """Format grouped conversations for display."""
+    if not convos:
+        return "No conversations found."
+
+    sections = []
+    for c in convos:
+        cid = c["conversation_id"]
+        # Show most recent message per conversation
+        msgs = sorted(c["events"], key=lambda e: e.get("created_at", ""))
+        latest = msgs[-1]
+        ts = latest.get("created_at", "")
+        try:
+            from datetime import datetime
+            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            ts_fmt = dt.strftime("[%Y-%m-%d %H:%M]")
+        except (ValueError, AttributeError):
+            ts_fmt = "[unknown]"
+
+        participants = [user_map.get(p, f"user:{p}") for p in c["participants"]]
+        sender = user_map.get(latest.get("sender_id", ""), f"user:{latest.get('sender_id', '?')}")
+        text = latest.get("text", "").replace("\n", " ")
+        if len(text) > 200:
+            text = text[:200] + "..."
+
+        sections.append(
+            f"{ts_fmt} [{', '.join(participants)}] (conv:{cid})\n"
+            f"  Latest from {sender}: {text}\n"
+            f"  ({len(msgs)} message{'s' if len(msgs) != 1 else ''} in window)"
+        )
+
+    return "\n\n".join(sections)
+
+
 @mcp.tool()
-async def x_list_dms(count: int = 20) -> str:
-    """List your recent DM messages. Requires OAuth with dm.read scope.
+async def x_list_dms(count: int = 50) -> str:
+    """List your actual DM conversations (where you've replied). Filters out unanswered message requests.
 
     Args:
-        count: Number of DM events to fetch (1-100, default 20)
+        count: Number of DM events to scan (1-100, default 50). Higher = more conversations found.
     """
     data = await _x_client().get_dm_events(max_results=min(count, 100))
-    return format_dm_events(data)
+    real, _, user_map = _split_dm_conversations(data)
+    header = f"Your DM conversations ({len(real)} active):\n\n"
+    return header + _format_conversations(real, user_map)
+
+
+@mcp.tool()
+async def x_message_requests(count: int = 50) -> str:
+    """List pending DM message requests — messages from people you haven't replied to.
+
+    Args:
+        count: Number of DM events to scan (1-100, default 50).
+    """
+    data = await _x_client().get_dm_events(max_results=min(count, 100))
+    _, requests, user_map = _split_dm_conversations(data)
+    header = f"Message requests ({len(requests)} pending):\n\n"
+    return header + _format_conversations(requests, user_map)
 
 
 @mcp.tool()
