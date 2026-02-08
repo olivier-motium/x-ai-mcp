@@ -25,8 +25,10 @@ class XClient:
         self._bearer = config.X_BEARER_TOKEN
         self._oauth_tokens: dict[str, str] | None = None
         self._client: httpx.AsyncClient | None = None
+        self._load_oauth_tokens()
 
-        # Try loading OAuth tokens for write operations
+    def _load_oauth_tokens(self) -> None:
+        """Load OAuth tokens from disk."""
         if config.X_TOKEN_PATH.exists():
             try:
                 self._oauth_tokens = json.loads(config.X_TOKEN_PATH.read_text())
@@ -39,12 +41,16 @@ class XClient:
         return self._client
 
     def _headers(self, use_oauth: bool = False) -> dict[str, str]:
-        if use_oauth and self._oauth_tokens:
-            token = self._oauth_tokens.get("access_token", "")
-            return {
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json",
-            }
+        if use_oauth:
+            # Reload tokens from disk if not yet loaded (supports late token arrival)
+            if not self._oauth_tokens:
+                self._load_oauth_tokens()
+            if self._oauth_tokens:
+                token = self._oauth_tokens.get("access_token", "")
+                return {
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                }
         return {
             "Authorization": f"Bearer {self._bearer}",
             "Content-Type": "application/json",
