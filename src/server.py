@@ -18,7 +18,11 @@ from .formatters import (
 from .grok_client import GrokClient
 from .x_client import XClient
 
-mcp = FastMCP("x-ai")
+mcp = FastMCP(
+    "x-ai",
+    host=config.MCP_HOST,
+    port=config.MCP_PORT,
+)
 
 # Clients initialized lazily on first tool call
 _x: XClient | None = None
@@ -368,6 +372,11 @@ async def x_analyze_account(username: str) -> str:
 
 def main():
     """Run the MCP server."""
+    transport = config.MCP_TRANSPORT
+    if transport not in ("stdio", "streamable-http", "sse"):
+        print(f"Error: Unknown transport '{transport}'. Use stdio or streamable-http.", file=sys.stderr)
+        sys.exit(1)
+
     if not config.X_BEARER_TOKEN:
         print("Warning: X_BEARER_TOKEN not set. X API tools will fail.", file=sys.stderr)
     if not config.X_USER_ID:
@@ -375,8 +384,10 @@ def main():
     if not config.XAI_API_KEY:
         print("Note: XAI_API_KEY not set. Intelligence tools (x_analyze_*, x_daily_digest) disabled.", file=sys.stderr)
 
-    print("x-ai-mcp: starting server...", file=sys.stderr)
-    mcp.run(transport="stdio")
+    print(f"x-ai-mcp: starting server (transport={transport})...", file=sys.stderr)
+    if transport == "streamable-http":
+        print(f"x-ai-mcp: listening on {config.MCP_HOST}:{config.MCP_PORT}", file=sys.stderr)
+    mcp.run(transport=transport)
 
 
 if __name__ == "__main__":

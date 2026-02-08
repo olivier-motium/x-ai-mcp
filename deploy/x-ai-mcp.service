@@ -1,0 +1,18 @@
+[Unit]
+Description=X AI MCP Server (StreamableHTTP)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/x-ai-mcp
+EnvironmentFile=/home/ubuntu/x-ai-mcp/.env
+ExecStart=/home/ubuntu/x-ai-mcp/.venv/bin/python -m src.server
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

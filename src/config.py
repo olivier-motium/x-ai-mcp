@@ -19,8 +19,13 @@ X_TOKEN_PATH: Path = Path(os.environ.get("X_TOKEN_PATH", "./token.json"))
 X_USER_ID: str = os.environ.get("X_USER_ID", "")
 
 # xAI / Grok
-XAI_API_KEY: str = os.environ.get("XAI_API_KEY", "")
+XAI_API_KEY: str = os.environ.get("XAI_API_KEY", "") or os.environ.get("X_AI_API_KEY", "")
 XAI_MODEL: str = os.environ.get("XAI_MODEL", "grok-4-1-fast")
+
+# Server transport config
+MCP_TRANSPORT: str = os.environ.get("MCP_TRANSPORT", "stdio")
+MCP_HOST: str = os.environ.get("MCP_HOST", "0.0.0.0")
+MCP_PORT: int = int(os.environ.get("MCP_PORT", "8420"))
 
 # API base URLs
 X_API_BASE = "https://api.x.com/2"
