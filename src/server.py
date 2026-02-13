@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import json
 import sys
 
 from mcp.server.fastmcp import FastMCP
 
 from . import config
+from .cookie_client import CookieClient
 from .formatters import (
     format_dm_events,
     format_grok_response,
+    format_internal_conversations,
+    format_internal_messages,
     format_tweet,
     format_tweet_list,
     format_user,
@@ -28,6 +32,7 @@ mcp = FastMCP(
 # Clients initialized lazily on first tool call
 _x: XClient | None = None
 _grok: GrokClient | None = None
+_cookie: CookieClient | None = None
 
 
 def _x_client() -> XClient:
@@ -47,6 +52,18 @@ def _grok_client() -> GrokClient:
             )
         _grok = GrokClient()
     return _grok
+
+
+def _cookie_client() -> CookieClient:
+    global _cookie
+    if _cookie is None:
+        if not config.X_AUTH_TOKEN or not config.X_CT0:
+            raise RuntimeError(
+                "X_AUTH_TOKEN and X_CT0 not set. Cookie-based DM access requires "
+                "session cookies from a logged-in x.com browser session."
+            )
+        _cookie = CookieClient()
+    return _cookie
 
 
 # ──────────────────────────────────────────────
@@ -451,6 +468,104 @@ async def x_analyze_account(username: str) -> str:
 
 
 # ──────────────────────────────────────────────
+# Internal DM Tools — Cookie-based (v1.1 API)
+# ──────────────────────────────────────────────
+
+
+@mcp.tool()
+async def x_dm_inbox(count: int = 20) -> str:
+    """List all DM conversations using X's internal API. Shows both regular and encrypted conversations.
+
+    Requires cookie-based auth (X_AUTH_TOKEN + X_CT0). Returns conversation list
+    with participant info, last message preview, and encryption status.
+
+    Args:
+        count: Max conversations to return (default 20)
+    """
+    client = _cookie_client()
+    data = await client.inbox_initial_state()
+    inbox = data.get("inbox_initial_state", {})
+    conversations = inbox.get("conversations", {})
+    users = inbox.get("users", {})
+    entries = inbox.get("entries", [])
+    return format_internal_conversations(conversations, users, entries, limit=count)
+
+
+@mcp.tool()
+async def x_dm_read_conversation(conversation_id: str, count: int = 50) -> str:
+    """Read messages from a DM conversation using X's internal API.
+
+    Returns message history with sender info and timestamps. For encrypted
+    conversations, attempts decryption if device keys are available.
+
+    Args:
+        conversation_id: The conversation ID (e.g., '1482356738963685378-44196397')
+        count: Max messages to fetch (default 50)
+    """
+    client = _cookie_client()
+    messages, users = await client.get_conversation_messages(conversation_id, limit=count)
+    return format_internal_messages(messages, users, conversation_id)
+
+
+@mcp.tool()
+async def x_dm_send(conversation_id: str, text: str) -> str:
+    """Send a DM via X's internal API. Works for both regular and encrypted conversations.
+
+    Args:
+        conversation_id: The conversation ID to send to
+        text: Message text to send
+    """
+    client = _cookie_client()
+    data = await client.send_message(conversation_id, text)
+    entries = data.get("entries", [])
+    if entries:
+        return f"Message sent to conversation {conversation_id}"
+    return f"Message sent (response: {json.dumps(data)[:200]})"
+
+
+@mcp.tool()
+async def x_dm_key_registry() -> str:
+    """List registered device keys for E2E encrypted DMs.
+
+    Shows all devices registered for encrypted messaging, with their
+    public keys and registration timestamps.
+    """
+    client = _cookie_client()
+    data = await client.get_key_registry()
+    entries = data.get("entries", [])
+    if not entries:
+        return "No device keys registered for encrypted DMs."
+
+    lines = [f"Registered E2E DM devices ({len(entries)}):"]
+    for i, entry in enumerate(entries, 1):
+        device_id = entry.get("device_id", "?")
+        pub_key = entry.get("public_key", "?")
+        created = entry.get("created_at", "?")
+        lines.append(f"\n{i}. Device {device_id}")
+        lines.append(f"   Public key: {pub_key[:40]}...")
+        lines.append(f"   Registered: {created}")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def x_dm_register_device() -> str:
+    """Register a new device for E2E encrypted DMs.
+
+    Generates a NIST P-256 key pair and registers the public key with
+    X's key registry. The private key is stored locally.
+    """
+    from .e2e_crypto import DeviceKeyManager
+
+    km = DeviceKeyManager()
+    if not km.has_keys:
+        km.generate_keys()
+
+    client = _cookie_client()
+    result = await client.register_device_key(km.public_key_b64)
+    return f"Device registered for E2E DMs. Public key: {km.public_key_b64[:40]}..."
+
+
+# ──────────────────────────────────────────────
 # Entry point
 # ──────────────────────────────────────────────
 
@@ -468,6 +583,10 @@ def main():
         print("Warning: X_USER_ID not set. Personal tools (timeline, bookmarks) will fail.", file=sys.stderr)
     if not config.XAI_API_KEY:
         print("Note: XAI_API_KEY not set. Intelligence tools (x_analyze_*, x_daily_digest) disabled.", file=sys.stderr)
+    if config.X_AUTH_TOKEN and config.X_CT0:
+        print("x-ai-mcp: Cookie auth active. Internal DM tools (x_dm_*) enabled.", file=sys.stderr)
+    else:
+        print("Note: X_AUTH_TOKEN/X_CT0 not set. Internal DM tools disabled.", file=sys.stderr)
 
     print(f"x-ai-mcp: starting server (transport={transport})...", file=sys.stderr)
     if transport == "streamable-http":

@@ -149,6 +149,124 @@ def format_dm_events(data: dict) -> str:
     return "\n".join(lines)
 
 
+def format_internal_conversations(
+    conversations: dict, users: dict, entries: list, limit: int = 20
+) -> str:
+    """Format conversations from v1.1 inbox_initial_state response."""
+    if not conversations:
+        return "No DM conversations found."
+
+    # Build user map
+    user_map: dict[str, str] = {}
+    for uid, udata in users.items():
+        name = udata.get("name", "")
+        screen = udata.get("screen_name", "")
+        user_map[uid] = f"{name} (@{screen})" if screen else f"user:{uid}"
+
+    # Sort by last message time (most recent first)
+    sorted_convos = sorted(
+        conversations.values(),
+        key=lambda c: c.get("sort_timestamp", "0"),
+        reverse=True,
+    )[:limit]
+
+    lines = [f"DM Conversations ({len(sorted_convos)} shown):\n"]
+    for conv in sorted_convos:
+        cid = conv.get("conversation_id", "?")
+        conv_type = conv.get("type", "ONE_TO_ONE")
+        encrypted = conv.get("dm_secret_conversations_enabled", False)
+
+        # Participants
+        participants = conv.get("participants", [])
+        pnames = []
+        for p in participants:
+            uid = p.get("user_id", "")
+            pnames.append(user_map.get(uid, f"user:{uid}"))
+
+        # Last message from entries
+        last_msg = ""
+        last_ts = ""
+        sort_ts = conv.get("sort_timestamp")
+        if sort_ts:
+            try:
+                from datetime import datetime
+
+                ts_sec = int(sort_ts) / 1000 if len(sort_ts) > 10 else int(sort_ts)
+                dt = datetime.fromtimestamp(ts_sec)
+                last_ts = dt.strftime("[%Y-%m-%d %H:%M]")
+            except (ValueError, OSError):
+                last_ts = "[?]"
+
+        enc_badge = " [ENCRYPTED]" if encrypted else ""
+        type_badge = " [GROUP]" if conv_type == "GROUP_DM" else ""
+
+        lines.append(
+            f"{last_ts} {', '.join(pnames)}{type_badge}{enc_badge}\n"
+            f"  conv_id: {cid}"
+        )
+
+    return "\n\n".join(lines)
+
+
+def format_internal_messages(
+    messages: list[dict], users: dict, conversation_id: str
+) -> str:
+    """Format messages from v1.1 conversation response."""
+    if not messages:
+        return f"No messages in conversation {conversation_id}."
+
+    # Build user map
+    user_map: dict[str, str] = {}
+    for uid, udata in users.items():
+        screen = udata.get("screen_name", "")
+        user_map[uid] = f"@{screen}" if screen else f"user:{uid}"
+
+    # Sort chronologically
+    sorted_msgs = sorted(
+        messages,
+        key=lambda m: m.get("message_data", {}).get("time", "0"),
+    )
+
+    lines = [f"Conversation {conversation_id} ({len(sorted_msgs)} messages):\n"]
+    for msg in sorted_msgs:
+        msg_data = msg.get("message_data", {})
+        sender_id = msg_data.get("sender_id", "?")
+        sender = user_map.get(sender_id, f"user:{sender_id}")
+        text = msg_data.get("text", "")
+        time_ms = msg_data.get("time", "")
+
+        ts_fmt = ""
+        if time_ms:
+            try:
+                from datetime import datetime
+
+                dt = datetime.fromtimestamp(int(time_ms) / 1000)
+                ts_fmt = dt.strftime("[%Y-%m-%d %H:%M]")
+            except (ValueError, OSError):
+                ts_fmt = "[?]"
+
+        # Check for encrypted content
+        encrypted = msg_data.get("dm_secret_conversations_enabled", False)
+        if not text and encrypted:
+            text = "[E2E encrypted message — decryption key needed]"
+        elif not text:
+            # Check for attachment
+            attachment = msg_data.get("attachment", {})
+            if attachment:
+                text = f"[attachment: {attachment.get('type', 'unknown')}]"
+            else:
+                text = "[empty message]"
+
+        # Truncate long messages
+        if len(text) > 500:
+            text = text[:500] + "..."
+
+        text = text.replace("\n", " ")
+        lines.append(f"{ts_fmt} {sender}: {text}")
+
+    return "\n".join(lines)
+
+
 def format_grok_response(data: dict) -> str:
     """Format Grok Responses API output (x_search results)."""
     # The Responses API returns output items

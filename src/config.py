@@ -11,12 +11,18 @@ def get_required(key: str) -> str:
     return val
 
 
-# X API
+# X API (v2 — official)
 X_BEARER_TOKEN: str = os.environ.get("X_BEARER_TOKEN", "")
 X_CLIENT_ID: str = os.environ.get("X_CLIENT_ID", "")
 X_CLIENT_SECRET: str = os.environ.get("X_CLIENT_SECRET", "")
 X_TOKEN_PATH: Path = Path(os.environ.get("X_TOKEN_PATH", "./token.json"))
 X_USER_ID: str = os.environ.get("X_USER_ID", "")
+
+# X internal API (cookie-based auth for encrypted DMs)
+X_AUTH_TOKEN: str = os.environ.get("X_AUTH_TOKEN", "")
+X_CT0: str = os.environ.get("X_CT0", "")
+X_ENCRYPTION_PIN: str = os.environ.get("X_ENCRYPTION_PIN", "")
+X_KEYS_PATH: Path = Path(os.environ.get("X_KEYS_PATH", "./x_device_keys.json"))
 
 # xAI / Grok
 XAI_API_KEY: str = os.environ.get("XAI_API_KEY", "") or os.environ.get("X_AI_API_KEY", "")
