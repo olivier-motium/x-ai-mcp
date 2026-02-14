@@ -532,8 +532,7 @@ async def x_dm_read_conversation(conversation_id: str, count: int = 50) -> str:
 async def _read_xchat_conversation(conversation_id: str, count: int) -> str:
     """Read and decrypt an XChat encrypted conversation."""
     from .e2e_crypto import (
-        E2ECryptoError, decode_decrypted_content, decrypt_message,
-        get_key_manager,
+        E2ECryptoError, decrypt_message_content, get_key_manager,
     )
     from .formatters import format_xchat_messages
     from .thrift_decoder import decode_message_event, extract_encrypted_conv_keys
@@ -578,16 +577,17 @@ async def _read_xchat_conversation(conversation_id: str, count: int) -> str:
                 except (E2ECryptoError, Exception):
                     continue
 
-    # Decrypt message text (NaCl secretbox → inner Thrift → text)
-    if conversation_key:
-        for msg in decoded_msgs:
-            enc_text = msg.get("encrypted_text", "")
-            if enc_text:
-                try:
-                    raw_pt = decrypt_message(enc_text, conversation_key)
-                    msg["decrypted_text"] = decode_decrypted_content(raw_pt)
-                except Exception as e:
-                    msg["decrypted_text"] = f"[decryption failed: {e}]"
+    # Decrypt/decode message text
+    for msg in decoded_msgs:
+        enc_text = msg.get("encrypted_text", "")
+        if enc_text:
+            try:
+                kv = msg.get("key_version", "")
+                msg["decrypted_text"] = decrypt_message_content(
+                    enc_text, kv, conversation_key,
+                )
+            except Exception as e:
+                msg["decrypted_text"] = f"[decryption failed: {e}]"
 
     # Build participant info
     detail = target.get("conversation_detail", {})

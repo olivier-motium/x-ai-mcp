@@ -217,33 +217,55 @@ def get_key_manager() -> DeviceKeyManager:
     return _key_manager
 
 
-def decrypt_message(ciphertext_b64: str, conversation_key: bytes) -> bytes:
-    """Decrypt a message using NaCl secretbox (XSalsa20-Poly1305).
+def decrypt_message_content(
+    enc_text: str, key_version: str, conversation_key: bytes | None,
+) -> str:
+    """Decrypt or decode XChat message content to plain text.
 
-    XChat messages use libsodium secretbox:
-      base64(nonce[24] || ciphertext || poly1305_tag[16])
+    Two formats depending on key_version:
+    - key_version set: NaCl secretbox encrypted → decrypt → inner Thrift → text
+    - key_version empty: content is already a Thrift struct (raw or base64) → parse directly
 
-    Returns raw decrypted bytes (a Thrift struct, NOT plain text).
-    Use decode_decrypted_content() to extract the text.
-    """
-    import nacl.secret
-
-    raw = base64.b64decode(ciphertext_b64)
-    box = nacl.secret.SecretBox(conversation_key)
-    return box.decrypt(raw)
-
-
-def decode_decrypted_content(plaintext: bytes) -> str:
-    """Decode the inner Thrift struct from decrypted XChat message bytes.
-
-    Inner structure:
-      field 1 (struct) → field 1 (struct) → field 1 (string) = text message
-      field 1 (struct) → field 4 (struct) → field 2 (string) = quote reply text
-      field 1 (struct) → field 1 (struct) → field 3 (list)  = attachments
+    Returns the extracted message text string.
     """
     from .thrift_decoder import decode_struct
 
-    fields, _ = decode_struct(plaintext)
+    if key_version and conversation_key:
+        # Encrypted: NaCl secretbox → inner Thrift struct
+        import nacl.secret
+
+        raw = base64.b64decode(enc_text)
+        box = nacl.secret.SecretBox(conversation_key)
+        plaintext = box.decrypt(raw)
+        fields, _ = decode_struct(plaintext)
+    else:
+        # Unencrypted: content IS the Thrift struct (raw bytes or base64)
+        raw = enc_text.encode("latin-1") if isinstance(enc_text, str) else enc_text
+        # Check if it starts with Thrift struct marker (0x0c = T_STRUCT)
+        if raw and raw[0] == 0x0C:
+            fields, _ = decode_struct(raw)
+        else:
+            # Try base64 decode first
+            try:
+                decoded = base64.b64decode(enc_text)
+                if decoded and decoded[0] == 0x0C:
+                    fields, _ = decode_struct(decoded)
+                else:
+                    return enc_text  # Plain text fallback
+            except Exception:
+                return enc_text  # Plain text fallback
+
+    return _extract_text_from_content(fields)
+
+
+def _extract_text_from_content(fields: dict) -> str:
+    """Extract message text from inner Thrift content struct.
+
+    Structure:
+      field 1 (struct) → field 1 (struct) → field 1 (string) = text
+      field 1 (struct) → field 4 (struct) → field 2 (string) = quote reply
+      field 1 (struct) → field 1 (struct) → field 3 (list)  = attachments
+    """
     content = fields.get(1, {})
     if not isinstance(content, dict):
         return "[unknown content format]"
