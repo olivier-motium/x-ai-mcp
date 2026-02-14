@@ -1,17 +1,15 @@
-"""X E2E encrypted DM crypto module.
+"""X E2E encrypted DM crypto module — XChat protocol (June 2025+).
 
-Supports both the legacy DirectMessagesCrypto protocol and the new
-XChat protocol (June 2025+). Both use P-256 ECDH + AES-GCM.
-
-Protocol (as implemented by X's web client):
-- Device keypair: ECDH NIST P-256
-- Conversation key: AES-GCM-256 (random, per-conversation)
-- Conversation key wrapping: ECDH ephemeral + SHA-256 KDF + AES-GCM-128
-- Message encryption: AES-GCM-256 with 12-byte random IV
+Protocol (reverse-engineered from X's web client):
+- Device keypair: ECDH NIST P-256 (registered via GraphQL AddXChatPublicKey)
+- Conversation key: 32-byte random (per-conversation)
+- Conversation key wrapping: ECDH ephemeral P-256 + SHA-256 KDF + AES-GCM-128
+- Message encryption: NaCl secretbox (XSalsa20-Poly1305, 24-byte nonce)
+- Decrypted message payload: Thrift TBinaryProtocol struct containing text
 - Encrypted conversation IDs start with "e" (e.g., "e1234-5678")
 
-XChat key management:
-- GraphQL: GetPublicKeys, AddXChatPublicKey
+Key management:
+- GraphQL: GetPublicKeys, AddXChatPublicKey, GetInitialXChatPageQuery
 - Private key backup: Juicebox PIN-based recovery (4 HSM realms)
 - Messages: Thrift TBinaryProtocol, base64-encoded
 """
@@ -22,7 +20,6 @@ import base64
 import hashlib
 import json
 import logging
-import os
 import uuid
 from pathlib import Path
 
@@ -71,7 +68,6 @@ def load_private_key_from_env():
         return None
 
     from cryptography.hazmat.primitives.asymmetric import ec
-    from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature  # noqa: F401
 
     d_bytes = _b64url_decode(d_b64url)
     d_int = int.from_bytes(d_bytes, "big")
@@ -217,36 +213,60 @@ def get_key_manager() -> DeviceKeyManager:
     return _key_manager
 
 
-def decrypt_message(ciphertext_b64: str, conversation_key: bytes) -> str:
-    """Decrypt a message using the conversation's AES-GCM-256 key.
+def decrypt_message(ciphertext_b64: str, conversation_key: bytes) -> bytes:
+    """Decrypt a message using NaCl secretbox (XSalsa20-Poly1305).
 
-    Format: base64(IV[12] || AES-GCM-256(plaintext))
+    XChat messages use libsodium secretbox:
+      base64(nonce[24] || ciphertext || poly1305_tag[16])
+
+    Returns raw decrypted bytes (a Thrift struct, NOT plain text).
+    Use decode_decrypted_content() to extract the text.
     """
-    if not _ensure_cryptography():
-        raise E2ECryptoError("cryptography package required")
-
-    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    import nacl.secret
 
     raw = base64.b64decode(ciphertext_b64)
-    iv = raw[:12]
-    ciphertext = raw[12:]
-
-    aesgcm = AESGCM(conversation_key)
-    plaintext = aesgcm.decrypt(iv, ciphertext, None)
-    return plaintext.decode("utf-8", errors="replace")
+    box = nacl.secret.SecretBox(conversation_key)
+    return box.decrypt(raw)
 
 
-def encrypt_message(plaintext: str, conversation_key: bytes) -> str:
-    """Encrypt a message using the conversation's AES-GCM-256 key.
+def decode_decrypted_content(plaintext: bytes) -> str:
+    """Decode the inner Thrift struct from decrypted XChat message bytes.
 
-    Returns: base64(IV[12] || AES-GCM-256(plaintext))
+    Inner structure:
+      field 1 (struct) → field 1 (struct) → field 1 (string) = text message
+      field 1 (struct) → field 4 (struct) → field 2 (string) = quote reply text
+      field 1 (struct) → field 1 (struct) → field 3 (list)  = attachments
     """
-    if not _ensure_cryptography():
-        raise E2ECryptoError("cryptography package required")
+    from .thrift_decoder import decode_struct
 
-    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    fields, _ = decode_struct(plaintext)
+    content = fields.get(1, {})
+    if not isinstance(content, dict):
+        return "[unknown content format]"
 
-    aesgcm = AESGCM(conversation_key)
-    iv = os.urandom(12)
-    ciphertext = aesgcm.encrypt(iv, plaintext.encode("utf-8"), None)
-    return base64.b64encode(iv + ciphertext).decode()
+    # Regular text message: content[1][1]
+    msg_struct = content.get(1, {})
+    if isinstance(msg_struct, dict):
+        text = msg_struct.get(1, "")
+        if isinstance(text, str) and text:
+            return text
+        # Image/attachment with no text
+        attachments = msg_struct.get(3, [])
+        if attachments:
+            att_names = []
+            for att in attachments:
+                if isinstance(att, dict):
+                    inner = att.get(1, {})
+                    if isinstance(inner, dict):
+                        att_names.append(inner.get(6, "attachment"))
+            return f"[media: {', '.join(att_names)}]" if att_names else "[attachment]"
+
+    # Quote reply: content[4][2]
+    quote = content.get(4, {})
+    if isinstance(quote, dict):
+        ref_id = quote.get(1, "")
+        text = quote.get(2, "")
+        if isinstance(text, str) and text:
+            return f"[reply to {ref_id}] {text}" if ref_id else text
+
+    return "[empty message]"
