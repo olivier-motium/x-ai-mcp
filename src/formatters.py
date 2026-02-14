@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
 
 
 def _ts(iso: str) -> str:
@@ -184,7 +183,6 @@ def format_internal_conversations(
             pnames.append(user_map.get(uid, f"user:{uid}"))
 
         # Last message from entries
-        last_msg = ""
         last_ts = ""
         sort_ts = conv.get("sort_timestamp")
         if sort_ts:

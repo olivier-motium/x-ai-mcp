@@ -9,9 +9,7 @@ Pattern adapted from oracular-spectacular's cookie_extractor.py + graphql_client
 
 from __future__ import annotations
 
-import json
 import time
-from datetime import datetime
 from typing import Any
 
 import httpx
@@ -177,20 +175,49 @@ class CookieClient:
         }
         return await self._request("POST", url, json_body=body)
 
-    # ── Key Registry API ──
+    # ── Key Registry API (requires X Premium) ──
 
-    async def get_key_registry(self) -> dict:
-        """Fetch registered device keys for the current user."""
-        url = "https://x.com/i/api/1.1/keyregistry/extract.json"
+    async def extract_public_keys(self, user_id: str) -> dict:
+        """Fetch registered E2E device public keys for a user.
+
+        Endpoint: GET keyregistry/extract_public_keys/{userId}
+        Returns: {public_keys: [{identity_key, device_id, ...}]}
+        Requires X Premium (returns 403 without it).
+        """
+        url = f"https://x.com/i/api/1.1/keyregistry/extract_public_keys/{user_id}"
         return await self._request("GET", url)
 
-    async def register_device_key(self, public_key_b64: str) -> dict:
-        """Register a new device public key with X's key registry."""
+    async def register_device_key(
+        self, device_id: str, registration_body: dict
+    ) -> dict:
+        """Register a device public key with X's key registry.
+
+        Endpoint: POST keyregistry/register
+        Body: {registration_id: int, identity_key: base64_spki}
+        Header: X-Client-UUID: device_id
+        Requires X Premium (returns 403 without it).
+        """
         url = "https://x.com/i/api/1.1/keyregistry/register"
-        body = {
-            "public_key": public_key_b64,
-        }
-        return await self._request("POST", url, json_body=body)
+        client = await self._get_client()
+        headers = self._headers()
+        headers["X-Client-UUID"] = device_id
+        resp = await client.post(url, json=registration_body, headers=headers)
+
+        # Handle ct0 rotation
+        for cookie_name, cookie_value in resp.cookies.items():
+            if cookie_name == "ct0":
+                self._ct0 = cookie_value
+
+        if resp.status_code == 403:
+            raise CookieClientError(
+                403,
+                "Key registry requires X Premium (Blue Verified). "
+                "Error 403: Not authorized to use this endpoint.",
+            )
+        if resp.status_code >= 400:
+            raise CookieClientError(resp.status_code, resp.text[:500])
+
+        return resp.json()
 
     # ── Conversation Helpers ──
 
