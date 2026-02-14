@@ -51,8 +51,12 @@ def _b64url_decode(s: str) -> bytes:
 
 
 def is_encrypted_conversation(conversation_id: str) -> bool:
-    """Check if a conversation ID indicates E2E encryption (starts with 'e')."""
-    return conversation_id.startswith("e")
+    """Check if a conversation ID indicates XChat E2E encryption.
+
+    XChat conversations use colon-separated user IDs (e.g., '123:456').
+    Regular DM conversations use dash-separated IDs (e.g., '123-456').
+    """
+    return ":" in conversation_id
 
 
 def load_private_key_from_env():
