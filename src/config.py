@@ -21,8 +21,11 @@ X_USER_ID: str = os.environ.get("X_USER_ID", "")
 # X internal API (cookie-based auth for encrypted DMs)
 X_AUTH_TOKEN: str = os.environ.get("X_AUTH_TOKEN", "")
 X_CT0: str = os.environ.get("X_CT0", "")
+X_KDT: str = os.environ.get("X_KDT", "")
 X_ENCRYPTION_PIN: str = os.environ.get("X_ENCRYPTION_PIN", "")
 X_KEYS_PATH: Path = Path(os.environ.get("X_KEYS_PATH", "./x_device_keys.json"))
+# Base64url-encoded P-256 private scalar (the "d" field from JWK)
+X_PRIVATE_KEY_D: str = os.environ.get("X_PRIVATE_KEY_D", "")
 
 # xAI / Grok
 XAI_API_KEY: str = os.environ.get("XAI_API_KEY", "") or os.environ.get("X_AI_API_KEY", "")

@@ -265,6 +265,100 @@ def format_internal_messages(
     return "\n".join(lines)
 
 
+def format_xchat_conversations(items: list, limit: int = 20) -> str:
+    """Format XChat conversations from GetInitialXChatPageQuery response."""
+    if not items:
+        return "No encrypted conversations found."
+
+    lines = []
+    for item in items[:limit]:
+        detail = item.get("conversation_detail", {})
+        cid = detail.get("conversation_id", "?")
+        participants = detail.get("participants_results", [])
+        names = []
+        for p in participants:
+            result = p.get("result", {})
+            core = result.get("core", {})
+            name = core.get("name", "")
+            screen = core.get("screen_name", "")
+            if screen:
+                names.append(f"{name} (@{screen})")
+            else:
+                names.append(f"user:{result.get('rest_id', '?')}")
+
+        msgs = item.get("latest_message_events", [])
+        lines.append(
+            f"[ENCRYPTED] {', '.join(names)} ({len(msgs)} msgs)\n"
+            f"  conv_id: {cid}"
+        )
+
+    return "\n\n".join(lines)
+
+
+def format_xchat_messages(
+    messages: list[dict],
+    participants: list[dict],
+    conversation_id: str,
+    has_key: bool = False,
+    limit: int = 50,
+) -> str:
+    """Format decoded XChat messages (from Thrift) for display."""
+    # Build participant map
+    user_map: dict[str, str] = {}
+    for p in participants:
+        result = p.get("result", {})
+        uid = result.get("rest_id", "")
+        core = result.get("core", {})
+        screen = core.get("screen_name", "")
+        user_map[uid] = f"@{screen}" if screen else f"user:{uid}"
+
+    if not messages:
+        return f"No messages in conversation {conversation_id}."
+
+    # Sort by timestamp
+    sorted_msgs = sorted(
+        messages,
+        key=lambda m: m.get("timestamp_ms", "0"),
+    )[:limit]
+
+    header = f"Conversation {conversation_id} ({len(sorted_msgs)} messages)"
+    if has_key:
+        header += " [DECRYPTED]"
+    else:
+        header += " [ENCRYPTED - no private key]"
+
+    lines = [header + ":\n"]
+    for msg in sorted_msgs:
+        sender_id = msg.get("sender_id", "?")
+        sender = user_map.get(sender_id, f"user:{sender_id}")
+        ts_ms = msg.get("timestamp_ms", "")
+
+        ts_fmt = ""
+        if ts_ms:
+            try:
+                from datetime import datetime
+                dt = datetime.fromtimestamp(int(ts_ms) / 1000)
+                ts_fmt = dt.strftime("[%Y-%m-%d %H:%M]")
+            except (ValueError, OSError):
+                ts_fmt = "[?]"
+
+        text = msg.get("decrypted_text", "")
+        if not text:
+            enc = msg.get("encrypted_text", "")
+            if enc:
+                text = "[encrypted message]"
+            else:
+                text = "[empty]"
+
+        if len(text) > 500:
+            text = text[:500] + "..."
+        text = text.replace("\n", " ")
+
+        lines.append(f"{ts_fmt} {sender}: {text}")
+
+    return "\n".join(lines)
+
+
 def format_grok_response(data: dict) -> str:
     """Format Grok Responses API output (x_search results)."""
     # The Responses API returns output items

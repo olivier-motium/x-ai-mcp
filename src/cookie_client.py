@@ -1,14 +1,15 @@
 """Cookie-based HTTP client for X's internal API (v1.1 + GraphQL).
 
 Uses session cookies (auth_token + ct0) with X's public bearer token
-to access internal endpoints like DM inbox, conversations, and the
-key registry for E2E encrypted messages.
+to access internal endpoints like DM inbox, conversations, the
+key registry for E2E encrypted messages, and XChat GraphQL.
 
 Pattern adapted from oracular-spectacular's cookie_extractor.py + graphql_client.py.
 """
 
 from __future__ import annotations
 
+import json
 import time
 from typing import Any
 
@@ -57,6 +58,9 @@ class CookieClient:
         return self._client
 
     def _headers(self) -> dict[str, str]:
+        cookie = f"auth_token={self._auth_token}; ct0={self._ct0}"
+        if config.X_KDT:
+            cookie += f"; kdt={config.X_KDT}"
         return {
             "authorization": PUBLIC_BEARER,
             "x-csrf-token": self._ct0,
@@ -68,7 +72,7 @@ class CookieClient:
             "user-agent": DEFAULT_UA,
             "origin": "https://x.com",
             "referer": "https://x.com/messages",
-            "cookie": f"auth_token={self._auth_token}; ct0={self._ct0}",
+            "cookie": cookie,
         }
 
     async def _request(
@@ -289,6 +293,48 @@ class CookieClient:
             max_id = new_min
 
         return all_messages, users
+
+    # ── XChat GraphQL API (encrypted DMs, June 2025+) ──
+
+    async def _gql_get(self, qid: str, op: str, variables: dict) -> dict:
+        """Execute a GraphQL GET query."""
+        url = f"https://x.com/i/api/graphql/{qid}/{op}"
+        params = {"variables": json.dumps(variables)}
+        return await self._request("GET", url, params=params)
+
+    async def _gql_post(self, qid: str, op: str, variables: dict) -> dict:
+        """Execute a GraphQL POST mutation."""
+        url = f"https://x.com/i/api/graphql/{qid}/{op}"
+        body = {"variables": variables, "queryId": qid}
+        return await self._request("POST", url, json_body=body)
+
+    async def xchat_inbox(self) -> dict:
+        """Fetch XChat inbox — encrypted conversations with Thrift messages.
+
+        Returns the full response with items containing conversation_detail,
+        latest_message_events (base64 Thrift), and key_change_events.
+        """
+        return await self._gql_get(
+            "Gl7r1aY59L7jLBjVC98lqg",
+            "GetInitialXChatPageQuery",
+            variables={},
+        )
+
+    async def xchat_public_keys(self, user_ids: list[str]) -> dict:
+        """Fetch registered public keys for users (P-256 SPKI format)."""
+        return await self._gql_get(
+            "RQAjOoIX9dIsHoVjuVV0Iw",
+            "GetPublicKeys",
+            variables={"ids": user_ids},
+        )
+
+    async def xchat_generate_token(self) -> dict:
+        """Generate an XChat auth token (JWT for Juicebox)."""
+        return await self._gql_post(
+            "Qh3fZRjPPtPoHYR_2sCZsA",
+            "GenerateXChatTokenMutation",
+            variables={},
+        )
 
     async def close(self) -> None:
         if self._client and not self._client.is_closed:

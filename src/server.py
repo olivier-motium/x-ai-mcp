@@ -18,6 +18,7 @@ from .formatters import (
     format_tweet_list,
     format_user,
     format_user_list,
+    format_xchat_conversations,
 )
 from .grok_client import GrokClient
 from .x_client import XClient
@@ -473,18 +474,18 @@ async def x_analyze_account(username: str) -> str:
 
 @mcp.tool()
 async def x_dm_inbox(count: int = 20) -> str:
-    """List all DM conversations using X's internal API. Shows both regular and encrypted conversations.
+    """List all DM conversations — both regular (REST API) and encrypted (XChat GraphQL).
 
-    Requires cookie-based auth (X_AUTH_TOKEN + X_CT0). Returns conversation list
-    with participant info, last message preview, and encryption status.
-    Encrypted conversations have IDs starting with 'e'.
+    Shows conversation list with participant info, last message preview,
+    and encryption status. Encrypted conversations are fetched from XChat
+    and decrypted if private key is available.
 
     Args:
         count: Max conversations to return (default 20)
     """
-    from .e2e_crypto import is_encrypted_conversation
-
     client = _cookie_client()
+
+    # Fetch regular DMs from REST API
     data = await client.inbox_initial_state()
     inbox = data.get("inbox_initial_state", {})
     conversations = inbox.get("conversations", {})
@@ -493,47 +494,112 @@ async def x_dm_inbox(count: int = 20) -> str:
 
     result = format_internal_conversations(conversations, users, entries, limit=count)
 
-    # Count encrypted conversations
-    encrypted_count = sum(
-        1 for cid in conversations if is_encrypted_conversation(cid)
-    )
-    if encrypted_count:
-        result += f"\n\n[{encrypted_count} encrypted conversation(s) detected]"
+    # Fetch encrypted DMs from XChat GraphQL
+    try:
+        xchat_data = await client.xchat_inbox()
+        items = xchat_data.get("data", {}).get("get_initial_chat_page", {}).get("items", [])
+        if items:
+            from .formatters import format_xchat_conversations
+            xchat_result = format_xchat_conversations(items, limit=count)
+            result += f"\n\n--- Encrypted Conversations (XChat) ---\n{xchat_result}"
+    except Exception as e:
+        result += f"\n\n[XChat inbox error: {e}]"
 
     return result
 
 
 @mcp.tool()
 async def x_dm_read_conversation(conversation_id: str, count: int = 50) -> str:
-    """Read messages from a DM conversation using X's internal API.
+    """Read messages from a DM conversation.
 
-    Returns message history with sender info and timestamps. Encrypted
-    conversations (IDs starting with 'e') are auto-detected; decryption
-    requires registered device keys and X Premium.
+    Automatically detects encrypted conversations (IDs starting with 'e')
+    and uses XChat GraphQL + decryption. Regular conversations use REST API.
 
     Args:
-        conversation_id: The conversation ID (e.g., '1482356738963685378-44196397')
+        conversation_id: The conversation ID
         count: Max messages to fetch (default 50)
     """
     from .e2e_crypto import is_encrypted_conversation
 
+    if is_encrypted_conversation(conversation_id):
+        return await _read_xchat_conversation(conversation_id, count)
+
     client = _cookie_client()
     messages, users = await client.get_conversation_messages(conversation_id, limit=count)
-    result = format_internal_messages(messages, users, conversation_id)
+    return format_internal_messages(messages, users, conversation_id)
 
-    if is_encrypted_conversation(conversation_id):
-        result += (
-            "\n\n[E2E ENCRYPTED] This conversation uses end-to-end encryption. "
-            "Messages with 'encrypted_text' fields require device key registration "
-            "and X Premium to decrypt."
-        )
 
-    return result
+async def _read_xchat_conversation(conversation_id: str, count: int) -> str:
+    """Read and decrypt an XChat encrypted conversation."""
+    from .e2e_crypto import (
+        E2ECryptoError, decrypt_message, get_key_manager,
+    )
+    from .formatters import format_xchat_messages
+    from .thrift_decoder import decode_message_event, extract_encrypted_conv_keys
+
+    client = _cookie_client()
+    xchat_data = await client.xchat_inbox()
+    items = xchat_data.get("data", {}).get("get_initial_chat_page", {}).get("items", [])
+
+    # Find the matching conversation
+    target = None
+    for item in items:
+        detail = item.get("conversation_detail", {})
+        cid = detail.get("conversation_id", "")
+        if cid == conversation_id:
+            target = item
+            break
+
+    if not target:
+        return f"Conversation {conversation_id} not found in XChat inbox."
+
+    # Decode messages from Thrift
+    raw_msgs = target.get("latest_message_events", [])
+    decoded_msgs = []
+    for msg_b64 in raw_msgs:
+        if isinstance(msg_b64, str):
+            try:
+                decoded_msgs.append(decode_message_event(msg_b64))
+            except Exception:
+                continue
+
+    # Try to decrypt if we have the private key
+    km = get_key_manager()
+    conversation_key = None
+    if km.has_keys:
+        key_events = target.get("latest_conversation_key_change_events", [])
+        if key_events:
+            enc_keys = extract_encrypted_conv_keys(key_events)
+            for _uid, enc_key_b64 in enc_keys.items():
+                try:
+                    conversation_key = km.decrypt_conversation_key(enc_key_b64)
+                    break
+                except (E2ECryptoError, Exception):
+                    continue
+
+    # Decrypt message text
+    if conversation_key:
+        for msg in decoded_msgs:
+            enc_text = msg.get("encrypted_text", "")
+            if enc_text:
+                try:
+                    msg["decrypted_text"] = decrypt_message(enc_text, conversation_key)
+                except Exception as e:
+                    msg["decrypted_text"] = f"[decryption failed: {e}]"
+
+    # Build participant info
+    detail = target.get("conversation_detail", {})
+    participants = detail.get("participants_results", [])
+
+    return format_xchat_messages(
+        decoded_msgs, participants, conversation_id,
+        has_key=conversation_key is not None, limit=count,
+    )
 
 
 @mcp.tool()
 async def x_dm_send(conversation_id: str, text: str) -> str:
-    """Send a DM via X's internal API. Works for both regular and encrypted conversations.
+    """Send a DM via X's internal API (regular conversations only).
 
     Args:
         conversation_id: The conversation ID to send to
@@ -545,81 +611,6 @@ async def x_dm_send(conversation_id: str, text: str) -> str:
     if entries:
         return f"Message sent to conversation {conversation_id}"
     return f"Message sent (response: {json.dumps(data)[:200]})"
-
-
-@mcp.tool()
-async def x_dm_key_registry(user_id: str | None = None) -> str:
-    """Fetch registered E2E device keys for a user. Requires X Premium.
-
-    Shows all devices registered for encrypted messaging, with their
-    public keys. Returns 403 if the account lacks X Premium.
-
-    Args:
-        user_id: User ID to fetch keys for (default: your own)
-    """
-    from .cookie_client import CookieClientError
-
-    uid = user_id or config.X_USER_ID
-    client = _cookie_client()
-    try:
-        data = await client.extract_public_keys(uid)
-    except CookieClientError as e:
-        if e.status == 403:
-            return (
-                "E2E encrypted DMs require X Premium (Blue Verified). "
-                "The keyregistry/extract_public_keys endpoint returned 403. "
-                "Subscribe to X Premium to enable encrypted DM features."
-            )
-        raise
-
-    keys = data.get("public_keys", [])
-    if not keys:
-        return f"No device keys registered for user {uid}."
-
-    lines = [f"Registered E2E devices for {uid} ({len(keys)}):"]
-    for i, entry in enumerate(keys, 1):
-        identity_key = entry.get("identity_key", "?")
-        device_id = entry.get("device_id", "?")
-        lines.append(f"\n{i}. Device {device_id}")
-        lines.append(f"   Identity key: {identity_key[:50]}...")
-    return "\n".join(lines)
-
-
-@mcp.tool()
-async def x_dm_register_device() -> str:
-    """Register this device for E2E encrypted DMs. Requires X Premium.
-
-    Generates a NIST P-256 key pair, saves it locally, and registers the
-    public key (identity_key) with X's key registry. Returns 403 if the
-    account lacks X Premium.
-    """
-    from .cookie_client import CookieClientError
-    from .e2e_crypto import DeviceKeyManager
-
-    km = DeviceKeyManager()
-    if not km.has_keys:
-        km.generate_keys()
-
-    client = _cookie_client()
-    try:
-        await client.register_device_key(
-            km.device_id, km.registration_body()
-        )
-    except CookieClientError as e:
-        if e.status == 403:
-            return (
-                "E2E encrypted DMs require X Premium (Blue Verified). "
-                "Device keys generated locally but registration failed (403). "
-                f"Device ID: {km.device_id}\n"
-                "Subscribe to X Premium to complete registration."
-            )
-        raise
-
-    return (
-        f"Device registered for E2E DMs.\n"
-        f"Device ID: {km.device_id}\n"
-        f"Identity key: {km.identity_key_b64[:50]}..."
-    )
 
 
 # ──────────────────────────────────────────────
