@@ -240,7 +240,8 @@ def decrypt_message_content(
         fields, _ = decode_struct(plaintext)
     else:
         # Unencrypted: content IS the Thrift struct (raw bytes or base64)
-        raw = enc_text.encode("latin-1") if isinstance(enc_text, str) else enc_text
+        # The Thrift decoder decoded field 100 as UTF-8; re-encode to get original bytes
+        raw = enc_text.encode("utf-8") if isinstance(enc_text, str) else enc_text
         # Check if it starts with Thrift struct marker (0x0c = T_STRUCT)
         if raw and raw[0] == 0x0C:
             fields, _ = decode_struct(raw)
